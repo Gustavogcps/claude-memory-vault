@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pin explicit versions — do NOT use macos-latest. The openrsync guarantee is
+        # version-dependent: macOS 15+ ships openrsync at /usr/bin/rsync; macOS 14 ships
+        # GNU rsync 2.6.9 (which the guard correctly refuses). macos-latest is mid-migration.
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    name: tests (${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show rsync flavor
+        run: /usr/bin/rsync --version | head -2
+      - name: Run test suite
+        run: tests/run-tests.sh
+
+  shellcheck:
+    runs-on: macos-15
+    name: shellcheck
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: brew install shellcheck
+      - name: Lint shell + templates
+        # Templates are bash with @@TOKENS@@; lint them as bash. SC1083/SC2154 false-positives
+        # from the tokens are acceptable to exclude.
+        run: |
+          shellcheck --shell=bash install.sh uninstall.sh tests/run-tests.sh tests/lib/assert.sh
+          shellcheck --shell=bash --exclude=SC1083,SC2154 templates/*.tmpl

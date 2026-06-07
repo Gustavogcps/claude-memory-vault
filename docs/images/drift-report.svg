@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" font-family="monospace">
+  <rect width="760" height="300" rx="10" fill="#0d1117"/>
+  <circle cx="28" cy="26" r="6" fill="#f85149"/>
+  <circle cx="48" cy="26" r="6" fill="#f0b72f"/>
+  <circle cx="68" cy="26" r="6" fill="#3fb950"/>
+  <text x="380" y="30" fill="#7d8590" font-size="12" text-anchor="middle">Claude Code — new session</text>
+  <line x1="0" y1="48" x2="760" y2="48" stroke="#21262d"/>
+  <text x="24" y="84" fill="#f0b72f" font-size="13" font-weight="700">MIRROR DRIFT REPORT — tell the user what differed before any other vault work:</text>
+  <text x="24" y="116" fill="#e6edf3" font-size="13">[2026-06-07 17:54:49] DRIFT modified in vault: ./MEMORY.md</text>
+  <text x="24" y="140" fill="#e6edf3" font-size="13">[2026-06-07 17:54:49] DRIFT deleted in vault: ./disk-context.md</text>
+  <text x="24" y="164" fill="#8b949e" font-size="13">(The mirror has already been restored from internal memory.</text>
+  <text x="24" y="184" fill="#8b949e" font-size="13"> Internal memory was never modified.)</text>
+  <line x1="24" y1="208" x2="736" y2="208" stroke="#21262d" stroke-dasharray="4 4"/>
+  <text x="24" y="236" fill="#58a6ff" font-size="13">--- User/For Claude.md (your standing inbox) ---</text>
+  <text x="24" y="262" fill="#e6edf3" font-size="13">Remember to revise the Q3 numbers before Friday.</text>
+</svg>

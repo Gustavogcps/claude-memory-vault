@@ -1,0 +1,11 @@
+.DS_Store
+*.bak
+*.swp
+.idea/
+.vscode/
+# never commit rendered scripts (they contain machine-specific paths)
+rendered/
+# never commit anything that could hold an API key
+*.key
+*token*
+.env

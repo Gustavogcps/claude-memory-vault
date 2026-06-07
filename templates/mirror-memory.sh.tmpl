@@ -1,0 +1,183 @@
+#!/bin/bash
+# managed-by: claude-memory-vault (rendered from templates/mirror-memory.sh.tmpl)
+# mirror-memory.sh — one-way mirror of Claude Code's internal memory into an Obsidian vault.
+# Docs: https://github.com/Gustavogcps/claude-memory-vault (docs/DESIGN.md)
+#
+# LAW: this script NEVER writes to the memory source directory. Flow is memory -> vault, only.
+# Modes:  sync [--quiet]   full pipeline: guards -> drift detect -> drift log -> rsync -> manifest
+#         check            drift detection only; writes NOTHING (no manifest, no log); stdout only
+#
+# Paths below are baked in at install time by install.sh (realpath'd literals). This is deliberate:
+# the security guards compare against exact literals — no runtime-variable paths, no env overrides.
+set -u
+
+MODE="${1:-sync}"
+QUIET=0
+[ "${2:-}" = "--quiet" ] && QUIET=1
+case "$MODE" in sync|check) ;; *) echo "usage: mirror-memory.sh [sync|check] [--quiet]" >&2; exit 2;; esac
+
+RSYNC="/usr/bin/rsync"
+SRC_EXPECTED="@@SRC_EXPECTED@@"
+VAULT_BASE="@@VAULT_BASE@@"
+DST_PARENT="$VAULT_BASE/Claude"
+DST_EXPECTED="$DST_PARENT/Memory"
+LOGDIR="@@LOGDIR@@"
+DRIFT_LOG="$LOGDIR/mirror-drift.log"
+MANIFEST="$LOGDIR/mirror-manifest.txt"
+MARKER="$LOGDIR/mirror-initialized"
+LOCKDIR="$LOGDIR/mirror.lock"
+
+mkdir -p "$LOGDIR"
+say()  { [ "$QUIET" -eq 0 ] && echo "$*"; return 0; }
+logd() { echo "[$(/bin/date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DRIFT_LOG"; }
+
+# ---- Guard 1: mkdir lock — the SOLE concurrency protection. Records owner PID.
+#      A lock whose owner process is dead is reclaimed immediately; an unreadable-PID lock is
+#      reclaimed only if older than 10 min (avoids racing a just-created lock before its pid lands).
+#      A LIVE owner is NEVER preempted: exit 75 (distinct) so callers can surface "reconciliation skipped".
+if mkdir "$LOCKDIR" 2>/dev/null; then
+  echo "$$" > "$LOCKDIR/pid"
+  trap 'rm -rf "$LOCKDIR"' EXIT
+else
+  owner="$(cat "$LOCKDIR/pid" 2>/dev/null)"
+  reclaim=0
+  case "$owner" in
+    ''|*[!0-9]*) [ -n "$(/usr/bin/find "$LOCKDIR" -maxdepth 0 -mmin +10 2>/dev/null)" ] && reclaim=1 ;;
+    *) /bin/kill -0 "$owner" 2>/dev/null || reclaim=1 ;;
+  esac
+  if [ "$reclaim" -eq 1 ]; then
+    rm -rf "$LOCKDIR"
+    logd "WARN stale lock removed (owner='${owner:-none}', presumed dead)"
+    mkdir "$LOCKDIR" 2>/dev/null || exit 75
+    echo "$$" > "$LOCKDIR/pid"
+    trap 'rm -rf "$LOCKDIR"' EXIT
+  else
+    exit 75   # a live sync holds the lock; reconciliation skipped this run
+  fi
+fi
+
+# ---- Guard 2: pinned binary must be openrsync (exit codes 0/1/2 only; GNU's 24 does not exist here)
+"$RSYNC" --version 2>/dev/null | /usr/bin/grep -q openrsync \
+  || { logd "ERROR $RSYNC is not openrsync — re-vet --delete semantics before syncing"; exit 1; }
+
+# ---- Guard 3: source — exact real path, directory, non-zero MEMORY.md (MEMORY.md is the index sentinel)
+SRC="$(/bin/realpath "$SRC_EXPECTED" 2>/dev/null)" || { say "memory dir absent; nothing to do"; exit 0; }
+[ "$SRC" = "$SRC_EXPECTED" ] || { logd "ERROR source resolved to unexpected path: $SRC — refusing"; exit 1; }
+[ -d "$SRC" ] || { say "memory dir absent; nothing to do"; exit 0; }
+[ -s "$SRC/MEMORY.md" ] || { say "MEMORY.md absent or empty — refusing to sync (protects mirror from --delete wipe)"; exit 0; }
+
+# ---- Guard 5a: vault absent => tolerated, silent (check mode says why)
+[ -d "$VAULT_BASE" ] || { [ "$MODE" = "check" ] && echo "vault base absent — nothing to check"; exit 0; }
+
+# ---- First run vs lost manifest (initialized marker disambiguates)
+FIRST_RUN=0
+if [ ! -f "$MANIFEST" ]; then
+  if [ -f "$MARKER" ]; then
+    if [ "$MODE" = "check" ]; then echo "DRIFT: manifest missing but system was initialized — drift of unknown extent"; exit 1; fi
+    logd "DRIFT manifest missing though system was initialized — drift of unknown extent; re-baselining"
+  else
+    FIRST_RUN=1
+  fi
+fi
+
+# ---- Guard 4: destination — realpath the PARENT (BSD realpath fails on a missing leaf), literal /Memory
+if [ ! -d "$DST_PARENT" ]; then
+  if [ "$FIRST_RUN" -eq 1 ]; then
+    mkdir -p "$DST_EXPECTED"
+  else
+    if [ "$MODE" = "check" ]; then echo "DRIFT: vault Claude/ zone is missing"; exit 1; fi
+    logd "DRIFT vault Claude/ zone missing — recreating mirror from memory"
+    mkdir -p "$DST_EXPECTED"
+  fi
+fi
+DST="$(/bin/realpath "$DST_PARENT" 2>/dev/null)/Memory"
+[ "$DST" = "$DST_EXPECTED" ] || { logd "ERROR destination resolved to unexpected path: $DST — refusing"; exit 1; }
+
+# ---- Guard 4b (CRITICAL destination-escape): realpath above resolves only the PARENT, so a
+#      symlink AT Claude/Memory would pass the string check and rsync --delete would FOLLOW it,
+#      destroying data OUTSIDE the vault. Refuse a symlinked or non-directory leaf outright.
+if [ -L "$DST_EXPECTED" ]; then
+  [ "$MODE" = "check" ] && echo "DRIFT: mirror root Claude/Memory is a symlink — refusing"
+  logd "ERROR mirror root Claude/Memory is a symlink — refusing (destination-escape guard)"
+  exit 1
+fi
+if [ -e "$DST_EXPECTED" ] && [ ! -d "$DST_EXPECTED" ]; then
+  [ "$MODE" = "check" ] && echo "DRIFT: mirror root Claude/Memory is not a directory — refusing"
+  logd "ERROR mirror root Claude/Memory exists but is not a directory — refusing"
+  exit 1
+fi
+
+# ---- Guard 5b: mirror wiped/missing while initialized => drift (manifest exists => we wrote there before)
+if [ -f "$MANIFEST" ] && { [ ! -d "$DST" ] || [ -z "$(ls -A "$DST" 2>/dev/null)" ]; }; then
+  if [ "$MODE" = "check" ]; then echo "DRIFT: mirror directory missing or empty — mirror was wiped in the vault"; exit 1; fi
+  logd "DRIFT mirror directory missing or empty — wiped in vault; recreating from memory"
+  mkdir -p "$DST"
+fi
+
+# ---- Mirror state: one "type:sha1:path" line per file/symlink. Type field means a file
+#      replaced by a same-content symlink can never masquerade as clean.
+mirror_state() {
+  ( cd "$DST" 2>/dev/null || return 0
+    /usr/bin/find . \( -type f -o -type l \) -print0 | /usr/bin/sort -z |
+    while IFS= read -r -d '' f; do
+      if [ -L "$f" ]; then t="L"; else t="F"; fi
+      h="$(/usr/bin/shasum "$f" 2>/dev/null | /usr/bin/awk '{print $1}')"
+      printf '%s:%s:%s\n' "$t" "${h:-unreadable}" "$f"
+    done )
+}
+
+# ---- Guard 6: manifest comparison BEFORE the destructive rsync. Evidence logged before erase.
+DRIFT=0
+if [ "$FIRST_RUN" -eq 0 ] && [ -f "$MANIFEST" ] && [ -d "$DST" ]; then
+  CURRENT="$(mirror_state)"
+  if [ "$CURRENT" != "$(cat "$MANIFEST")" ]; then
+    DRIFT=1
+    NEW_LINES="$(/usr/bin/comm -13 <(/usr/bin/sort "$MANIFEST") <(printf '%s\n' "$CURRENT" | /usr/bin/sort) | /usr/bin/grep -v '^$' || true)"
+    OLD_LINES="$(/usr/bin/comm -23 <(/usr/bin/sort "$MANIFEST") <(printf '%s\n' "$CURRENT" | /usr/bin/sort) | /usr/bin/grep -v '^$' || true)"
+    NEW_PATHS="$(printf '%s\n' "$NEW_LINES" | /usr/bin/cut -d: -f3- | /usr/bin/sort | /usr/bin/grep -v '^$' || true)"
+    OLD_PATHS="$(printf '%s\n' "$OLD_LINES" | /usr/bin/cut -d: -f3- | /usr/bin/sort | /usr/bin/grep -v '^$' || true)"
+    MODIFIED="$(/usr/bin/comm -12 <(printf '%s\n' "$NEW_PATHS") <(printf '%s\n' "$OLD_PATHS") | /usr/bin/grep -v '^$' || true)"
+    ADDED="$(/usr/bin/comm -23 <(printf '%s\n' "$NEW_PATHS") <(printf '%s\n' "$MODIFIED") | /usr/bin/grep -v '^$' || true)"
+    DELETED="$(/usr/bin/comm -23 <(printf '%s\n' "$OLD_PATHS") <(printf '%s\n' "$MODIFIED") | /usr/bin/grep -v '^$' || true)"
+    report_drift() {  # $1 = output function name: logd or echo
+      [ -n "$MODIFIED" ] && printf '%s\n' "$MODIFIED" | while IFS= read -r p; do "$1" "DRIFT modified in vault: $p"; done
+      [ -n "$ADDED"    ] && printf '%s\n' "$ADDED"    | while IFS= read -r p; do "$1" "DRIFT added in vault: $p";    done
+      [ -n "$DELETED"  ] && printf '%s\n' "$DELETED"  | while IFS= read -r p; do "$1" "DRIFT deleted in vault: $p";  done
+      return 0
+    }
+    if [ "$MODE" = "check" ]; then report_drift echo; exit 1; fi
+    report_drift logd
+  fi
+fi
+if [ "$MODE" = "check" ]; then echo "mirror clean"; exit 0; fi
+
+# ---- Guard 6b (TOCTOU): close the snapshot->rsync window. A file an external writer (Obsidian
+#      Sync, iCloud conflict copy) drops into the mirror AFTER the drift snapshot would be erased
+#      by --delete with no drift entry. Re-list immediately before rsync; log any path that is in
+#      the mirror now, was NOT in the snapshot, and is NOT legit source content, before it is erased.
+if [ "$FIRST_RUN" -eq 0 ] && [ -f "$MANIFEST" ] && [ -d "$DST" ]; then
+  LATE_PATHS="$( ( cd "$DST" && /usr/bin/find . \( -type f -o -type l \) ) 2>/dev/null | /usr/bin/sort | /usr/bin/grep -v '^$' || true )"
+  SNAP_PATHS="$(printf '%s\n' "${CURRENT:-}" | /usr/bin/cut -d: -f3- | /usr/bin/sort | /usr/bin/grep -v '^$' || true)"
+  SRC_PATHS="$( ( cd "$SRC" && /usr/bin/find . \( -type f -o -type l \) ) 2>/dev/null | /usr/bin/sort | /usr/bin/grep -v '^$' || true )"
+  UNSEEN="$(/usr/bin/comm -23 <(printf '%s\n' "$LATE_PATHS") <(printf '%s\n' "$SNAP_PATHS") | /usr/bin/grep -v '^$' || true)"
+  UNSEEN="$(/usr/bin/comm -23 <(printf '%s\n' "$UNSEEN") <(printf '%s\n' "$SRC_PATHS") | /usr/bin/grep -v '^$' || true)"
+  if [ -n "$UNSEEN" ]; then
+    DRIFT=1
+    printf '%s\n' "$UNSEEN" | while IFS= read -r p; do logd "DRIFT added in vault (late, caught pre-sync): $p"; done
+  fi
+fi
+
+# ---- The one-way sync. Trailing slashes are REQUIRED on both args (contents-into-dir semantics).
+#      --safe-links drops absolute/out-of-tree source symlinks; in-tree relative symlinks mirror
+#      and are tracked as type L in the manifest.
+RS_OUT="$("$RSYNC" -a --delete --safe-links "$SRC/" "$DST/" 2>&1)"; rc=$?
+if [ $rc -ne 0 ]; then
+  logd "ERROR rsync exit $rc — sync aborted, manifest NOT updated. Output: $RS_OUT"
+  exit 1
+fi
+
+# ---- Manifest + marker updated only after success
+mirror_state > "$MANIFEST"
+touch "$MARKER"
+if [ "$DRIFT" -eq 1 ]; then say "mirror restored (drift logged)"; else say "mirror synced"; fi
+exit 0

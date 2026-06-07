@@ -1,0 +1,21 @@
+#!/bin/bash
+# managed-by: claude-memory-vault (rendered from templates/vault-post-write.sh.tmpl)
+# vault-post-write.sh — PostToolUse(Write|Edit) hook. Reads hook JSON on stdin.
+# Exits immediately unless the touched file is inside the internal memory dir; then mirrors.
+# NOTE: this runs after EVERY Write/Edit anywhere (hooks cannot pre-filter by path) — the
+# early exit below is the filter. Cost when not a memory write: ~1ms.
+set -u
+MEM_DIR="@@SRC_EXPECTED@@"
+HOOKS_DIR="@@HOOKS_DIR@@"
+
+FILE="$(/usr/bin/python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get("tool_input", {}).get("file_path", ""))
+except Exception:
+    print("")' 2>/dev/null)"
+
+case "$FILE" in
+  "$MEM_DIR"/*) exec "$HOOKS_DIR/mirror-memory.sh" sync --quiet ;;
+  *) exit 0 ;;
+esac

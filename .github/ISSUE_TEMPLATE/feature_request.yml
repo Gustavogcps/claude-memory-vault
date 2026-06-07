@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest an idea or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Lead with the need, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed approach
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Does it affect the safety invariants?
+      description: One-way flow, vault-never-wins, drift-always-surfaced, ownership zones. See docs/DESIGN.md.
