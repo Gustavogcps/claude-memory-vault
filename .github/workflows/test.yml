@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: this workflow only checks out and runs tests — it needs nothing else.
+permissions:
+  contents: read
+
+# Cancel superseded runs on rapid pushes (macOS runners are the expensive class).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -18,8 +27,10 @@ jobs:
     name: tests (${{ matrix.os }})
     steps:
       - uses: actions/checkout@v4
-      - name: Show rsync flavor
-        run: /usr/bin/rsync --version | head -2
+      - name: Show toolchain (rsync flavor + python3)
+        run: |
+          /usr/bin/rsync --version | head -2
+          python3 --version   # the suite renders templates + validates JSON via python3
       - name: Run test suite
         run: tests/run-tests.sh
 
@@ -31,8 +42,27 @@ jobs:
       - name: Install shellcheck
         run: brew install shellcheck
       - name: Lint shell + templates
-        # Templates are bash with @@TOKENS@@; lint them as bash. SC1083/SC2154 false-positives
-        # from the tokens are acceptable to exclude.
+        # Templates are bash with @@TOKENS@@ inside quoted strings; they lint clean today.
+        # The exclusions are precautionary (token-related) and suppress nothing currently.
         run: |
           shellcheck --shell=bash install.sh uninstall.sh tests/run-tests.sh tests/lib/assert.sh
           shellcheck --shell=bash --exclude=SC1083,SC2154 templates/*.tmpl
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    name: secret-scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked files for accidental personal data / secrets
+        # Generic patterns (no sensitive literals embedded here). Paths must use ~ or $HOME,
+        # never an absolute /Users/<name>; no personal emails; no bearer tokens / long hex keys.
+        run: |
+          set -e
+          files=$(git ls-files)
+          fail=0
+          if echo "$files" | xargs grep -nE '/Users/[a-z]' 2>/dev/null; then echo "::error::absolute /Users/ path found — use ~ or \$HOME"; fail=1; fi
+          if echo "$files" | xargs grep -niE '[a-z0-9._%+-]+@(gmail|outlook|yahoo|hotmail|icloud)\.com' 2>/dev/null; then echo "::error::personal email found"; fail=1; fi
+          if echo "$files" | xargs grep -nE 'Bearer[[:space:]]+[A-Za-z0-9]{20,}' 2>/dev/null; then echo "::error::bearer token literal found — use a placeholder"; fail=1; fi
+          if echo "$files" | xargs grep -nE '[0-9a-f]{64}' 2>/dev/null; then echo "::error::64-hex string (API-key shape) found"; fail=1; fi
+          [ "$fail" -eq 0 ] && echo "secret-scan clean"
+          exit $fail

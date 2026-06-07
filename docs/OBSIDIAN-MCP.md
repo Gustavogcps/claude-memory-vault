@@ -6,13 +6,21 @@ The mirror itself works with Obsidian open or closed — it's just files. But if
 
 1. In Obsidian: **Settings → Community plugins → Browse →** search **"Local REST API"** → Install → Enable.
 2. Confirm it's **v4.1.3 or newer** (earlier 4.x had a path-traversal fix you want).
-3. Open **Settings → Local REST API**. Optionally enable **"Non-encrypted (HTTP) Server"** to avoid self-signed-cert friction (it stays localhost-only either way).
-4. Copy the **API key** shown on that settings page.
-5. Register it with Claude Code:
+3. Open **Settings → Local REST API**. Copy the **API key** shown on that settings page.
+4. Choose an endpoint:
+   - **HTTPS (default, port 27124)** — on by default, but uses a self-signed cert your client must trust or skip-verify.
+   - **HTTP (port 27123)** — simplest; enable **"Non-encrypted (HTTP) Server"** on that settings page first. Localhost-only either way.
+5. Register it with Claude Code — use the line matching the endpoint you chose:
 
    ```bash
+   # If you enabled the HTTP server (port 27123):
    claude mcp add --scope user --transport http obsidian \
      http://127.0.0.1:27123/mcp/ \
+     --header "Authorization: Bearer YOUR_API_KEY_HERE"
+
+   # Default HTTPS server (port 27124) — note the self-signed cert caveat above:
+   claude mcp add --scope user --transport http obsidian \
+     https://127.0.0.1:27124/mcp/ \
      --header "Authorization: Bearer YOUR_API_KEY_HERE"
    ```
 

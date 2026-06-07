@@ -3,15 +3,27 @@
 # vault-post-write.sh — PostToolUse(Write|Edit) hook. Reads hook JSON on stdin.
 # Exits immediately unless the touched file is inside the internal memory dir; then mirrors.
 # NOTE: this runs after EVERY Write/Edit anywhere (hooks cannot pre-filter by path) — the
-# early exit below is the filter. Cost when not a memory write: ~1ms.
+# early exit below is the filter. The common case (a write that isn't to a memory file) is a
+# pure-bash substring reject with no interpreter spawn — ~2ms, essentially the bash-startup floor.
+# A python3 parse runs only on the rare write whose JSON even mentions the memory path, to confirm
+# it's actually tool_input.file_path.
 set -u
 MEM_DIR="@@SRC_EXPECTED@@"
 HOOKS_DIR="@@HOOKS_DIR@@"
 
-FILE="$(/usr/bin/python3 -c 'import json,sys
+# Fast path: slurp the hook JSON once with a bash builtin (no cat subprocess). If the memory dir
+# path is not even a substring, this is definitely not a memory write — exit now, no python3.
+IFS= read -r -d '' INPUT 2>/dev/null || true
+case "$INPUT" in
+  *"$MEM_DIR"*) ;;            # memory path appears somewhere — fall through to the precise check
+  *) exit 0 ;;
+esac
+
+# Precise check (rare): confirm the memory path is the actual file_path field, not some other
+# field that merely contains the string. Only now do we pay for a python3 spawn.
+FILE="$(printf '%s' "$INPUT" | /usr/bin/python3 -c 'import json,sys
 try:
-    d = json.load(sys.stdin)
-    print(d.get("tool_input", {}).get("file_path", ""))
+    print(json.load(sys.stdin).get("tool_input", {}).get("file_path", ""))
 except Exception:
     print("")' 2>/dev/null)"
 

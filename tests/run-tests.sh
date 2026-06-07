@@ -1,8 +1,9 @@
 #!/bin/bash
 # claude-memory-vault — self-contained test suite.
 # Renders the templates into disposable /private/tmp sandboxes (the same render path install.sh
-# uses) and exercises every guard, including the destructive rsync --delete logic, against
-# throwaway data. Never touches your real vault, memory, or settings. Exit 1 if any test fails.
+# uses) and exercises the destructive rsync --delete logic and every guard that has a deterministic
+# trigger, plus the installer's settings.json merge/removal safety. Never touches your real vault,
+# memory, or settings. Exit 1 if any test fails.
 #
 # Usage: tests/run-tests.sh
 set -u
@@ -71,6 +72,7 @@ assert_file_absent "$LOG/mirror-drift.log" "forward deletion logged NO drift"
 
 # ── 3. Vault-side edit + delete + add are each detected, classified, restored ──
 echo "[3] vault-side tamper detected & restored"
+SRC_HASH_BEFORE="$(/usr/bin/find "$SRC" -type f -exec shasum {} \; | sort | shasum | awk '{print $1}')"
 echo "TAMPERED" >> "$P/MEMORY.md"
 rm "$P/note with spaces.md"
 echo intruder > "$P/new-vault-file.md"
@@ -81,8 +83,9 @@ assert_log_contains "$LOG/mirror-drift.log" "added in vault: ./new-vault-file.md
 assert_not_contains "$(cat "$P/MEMORY.md")" "TAMPERED" "edit reverted"
 assert_file_exists "$P/note with spaces.md" "deleted file restored"
 assert_file_absent "$P/new-vault-file.md" "added file removed"
-# one-way proof: source MEMORY.md never gained TAMPERED
-assert_not_contains "$(cat "$SRC/MEMORY.md")" "TAMPERED" "INTERNAL MEMORY untouched (one-way)"
+# one-way proof: the entire memory SOURCE tree is byte-identical before and after the restore
+SRC_HASH_AFTER="$(/usr/bin/find "$SRC" -type f -exec shasum {} \; | sort | shasum | awk '{print $1}')"
+assert_eq "$SRC_HASH_BEFORE" "$SRC_HASH_AFTER" "INTERNAL MEMORY byte-identical before/after (one-way)"
 
 # ── 4. CRITICAL: symlinked Memory leaf is refused, not followed (destination escape) ──
 echo "[4] CRITICAL symlinked-destination escape is refused"
@@ -228,5 +231,66 @@ echo "[15] uninstall removes only our hooks"
 after="$(cat "$IROOT/.claude/settings.json")"
 assert_contains "$after" "/some/foreign/hook.sh" "foreign hook survives uninstall"
 assert_not_contains "$after" "vault-post-write.sh" "our hook removed by uninstall"
+
+# ── 16. uninstall preserves a foreign command CO-LOCATED in the same hooks[] block as ours ──
+echo "[16] co-located foreign hook survives per-hook removal"
+JROOT="$SANDBOX_BASE/jroot"; mkdir -p "$JROOT/.claude/hooks"
+JH="$JROOT/.claude/hooks"
+cat > "$JROOT/.claude/settings.json" <<EOF
+{
+  "hooks": {
+    "SessionEnd": [
+      { "hooks": [
+        { "type": "command", "command": "/foreign/important-cleanup.sh" },
+        { "type": "command", "command": "$JH/mirror-memory.sh sync --quiet" }
+      ] }
+    ]
+  }
+}
+EOF
+"$REPO_DIR/uninstall.sh" --root "$JROOT" >/dev/null 2>&1
+jafter="$(cat "$JROOT/.claude/settings.json")"
+assert_contains "$jafter" "/foreign/important-cleanup.sh" "co-located foreign command preserved"
+assert_not_contains "$jafter" "mirror-memory.sh sync --quiet" "our co-located command removed"
+
+# ── 17. a foreign command that merely CONTAINS our basename is never touched ──
+echo "[17] substring-name foreign hook untouched"
+KROOT="$SANDBOX_BASE/kroot"; mkdir -p "$KROOT/.claude/hooks"
+KH="$KROOT/.claude/hooks"
+cat > "$KROOT/.claude/settings.json" <<EOF
+{
+  "hooks": {
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "/opt/tools/my-mirror-memory.sh.backup-runner" }] }
+    ]
+  }
+}
+EOF
+"$REPO_DIR/uninstall.sh" --root "$KROOT" >/dev/null 2>&1
+kafter="$(cat "$KROOT/.claude/settings.json")"
+assert_contains "$kafter" "my-mirror-memory.sh.backup-runner" "foreign command containing our name preserved"
+# and install must still register OUR real SessionEnd hook alongside it (not be fooled by the substring)
+"$REPO_DIR/install.sh" --root "$KROOT" --vault "$KROOT/Vault" -y >/dev/null 2>&1
+kinst="$(cat "$KROOT/.claude/settings.json")"
+assert_contains "$kinst" "$KH/mirror-memory.sh sync --quiet" "our real SessionEnd hook registered despite lookalike"
+assert_contains "$kinst" "my-mirror-memory.sh.backup-runner" "lookalike still preserved after install"
+
+# ── 18. malformed settings.json => install FAILS LOUDLY, leaves file unchanged ──
+echo "[18] malformed settings.json fails loudly"
+MROOT="$SANDBOX_BASE/mroot"; mkdir -p "$MROOT/.claude"
+printf '{ "hooks": "this is not an object" }' > "$MROOT/.claude/settings.json"
+orig="$(cat "$MROOT/.claude/settings.json")"
+"$REPO_DIR/install.sh" --root "$MROOT" --vault "$MROOT/Vault" -y >/dev/null 2>&1
+assert_exit "$?" "1" "install exits non-zero on malformed settings"
+assert_eq "$(cat "$MROOT/.claude/settings.json")" "$orig" "malformed settings left unchanged"
+
+# ── 19. TOCTOU re-check: symlinked leaf is refused right before rsync too ──
+echo "[19] pre-rsync TOCTOU re-check refuses symlinked leaf"
+fresh_sandbox t19
+"$MIRROR" sync --quiet
+OUT2="$SANDBOX_BASE/t19-out"; mkdir -p "$OUT2"; printf 'KEEP\n' > "$OUT2/data.txt"
+rm -rf "$P"; ln -s "$OUT2" "$P"
+"$MIRROR" sync >/dev/null 2>&1; assert_exit "$?" "1" "symlinked leaf refused"
+assert_contains "$(cat "$OUT2/data.txt")" "KEEP" "outside data intact through both 4b and re-check"
 
 summary

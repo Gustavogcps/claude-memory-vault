@@ -6,12 +6,14 @@
 
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![tests](https://img.shields.io/badge/tests-53%20passing-3fb950)
+![tests](https://img.shields.io/badge/tests-62%20passing-3fb950)
 ![shell](https://img.shields.io/badge/bash-3.2%2B-89e051)
 
 ![one-way mirror diagram](docs/images/flow.svg)
 
 </div>
+
+> **Requires macOS 15+ (Sequoia or later).** The mirror pins Apple's openrsync and uses BSD `realpath`/`stat`; macOS 14 (which ships GNU rsync) and Linux/Windows are **refused at install time**, not silently broken. Cross-platform is the flagship [good-first-issue](../../issues).
 
 ## What it does
 
@@ -32,27 +34,29 @@ cd claude-memory-vault
 # then restart Claude Code
 ```
 
+`install.sh` is interactive: it asks for your vault path (default `~/Claude Vault`) and whether to scaffold the `Claude/` `User/` `Shared/` zones. **Nothing destructive runs during install** — the mirror only syncs on your next session. (Note: Claude's memory source appears after Claude Code saves its first auto-memory, so a brand-new setup may mirror nothing until then.)
+
 That's it. Your next session begins with a clean sync — or a drift report if anything in the mirror was changed. See [`docs/DESIGN.md`](docs/DESIGN.md) for the full design and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it works.
 
 ## Battle-tested
 
-This survived **five adversarial review rounds**. Round five was a live **29-agent red-team** firing at the actual scripts — and it found a *critical* bug: a malicious symlink at the mirror root could make `rsync --delete` follow it and destroy data **outside** the vault. It's fixed (guard 4b), regression-tested, and the whole story — including three other majors and the bugs document-review *missed* — is in **[docs/RED-TEAM.md](docs/RED-TEAM.md)**.
+A round of review that ran *real attacks* against the built scripts (not just reading the design) found a **critical** bug: a malicious symlink at the mirror root could make `rsync --delete` follow it and destroy data **outside** the vault. It's fixed (guard 4b + a pre-`rsync` re-check for the race), regression-tested, and the whole story — five review rounds, the multi-agent red-team, three other majors, and the bugs that document review *missed* — is in **[docs/RED-TEAM.md](docs/RED-TEAM.md)**.
 
 The lesson, if you take one thing: *reading a design finds design bugs; running it finds real ones.* Which is why the [test suite](tests/run-tests.sh) actually exercises the destructive `rsync --delete` logic — in disposable sandboxes — so you can watch the guarantees hold:
 
 ```bash
-tests/run-tests.sh     # 53 checks, all in /private/tmp; never touches real data
+tests/run-tests.sh     # 62 checks, all in /private/tmp; never touches real data
 ```
 
 ## FAQ
 
-**Is my Claude memory safe?** Yes. Nothing in this system writes to the memory directory — it's read-only as a source. The source guard and [test 3](tests/run-tests.sh) prove the memory is byte-identical before and after a restore.
+**Is my Claude memory safe?** Yes — by design. Nothing in this system writes to the memory directory; it's read-only as a source, and [test 3](tests/run-tests.sh) checksums the whole source tree before and after a restore to prove it stays byte-identical. (As always: AS-IS, no warranty — review the rendered scripts in `~/.claude/hooks/`.)
 
 **What if I edit a mirrored file in Obsidian?** It's detected, logged as evidence *before* anything is touched, reported to you at the next session start, then restored from memory. Your edit is never written back. (If you want to keep notes, use the `User/` or `Shared/` zones, or ask Claude to save to `Claude/Notes/`.)
 
 **Does it work with Obsidian Sync / iCloud?** The mirror works with Obsidian closed and tolerates the vault being offline. Sync-service conflict copies are caught as drift. (Assumes the vault is on local storage, not an iCloud dataless-placeholder path.)
 
-**Will it slow Claude Code down?** No. The per-write hook early-exits in ~1ms unless you actually touched a memory file.
+**Will it slow Claude Code down?** No. The per-write hook early-exits in ~2ms (essentially just a bash process spawn — no interpreter, no work) unless you actually touched a memory file.
 
 **Linux / Windows?** macOS-only for now — the design pins openrsync and uses BSD `realpath`/`stat`. Cross-platform support is the flagship [good-first-issue](../../issues). PRs welcome.
 

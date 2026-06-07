@@ -167,6 +167,19 @@ if [ "$FIRST_RUN" -eq 0 ] && [ -f "$MANIFEST" ] && [ -d "$DST" ]; then
   fi
 fi
 
+# ---- Guard 4b-recheck (TOCTOU): re-assert the mirror root is a real directory in the few syscalls
+#      immediately before the destructive rsync. Guard 4b runs ~65 lines earlier; without this, a
+#      racing swap of Claude/Memory to a symlink (a hostile sync client / writer) between 4b and the
+#      rsync would let --delete follow it and destroy data OUTSIDE the vault. This shrinks that
+#      window from milliseconds to microseconds. (Pure shell can't fully close it — keep the vault
+#      on local storage not shared with untrusted writers; see docs/DESIGN.md.)
+# A symlink, or an existing non-directory, is the attack — refuse. A *missing* leaf is fine:
+# rsync creates a fresh real directory there (first run, or after a legitimate wipe).
+if [ -L "$DST_EXPECTED" ] || { [ -e "$DST_EXPECTED" ] && [ ! -d "$DST_EXPECTED" ]; }; then
+  logd "ERROR mirror root became a symlink/non-directory just before sync — refusing (TOCTOU re-check)"
+  exit 1
+fi
+
 # ---- The one-way sync. Trailing slashes are REQUIRED on both args (contents-into-dir semantics).
 #      --safe-links drops absolute/out-of-tree source symlinks; in-tree relative symlinks mirror
 #      and are tracked as type L in the manifest.

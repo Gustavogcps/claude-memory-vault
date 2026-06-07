@@ -81,8 +81,13 @@ else
 fi
 case "$VAULT_BASE" in "~"*) VAULT_BASE="$HOME_DIR${VAULT_BASE#"~"}" ;; esac
 VAULT_BASE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$VAULT_BASE")"
-case "$VAULT_BASE" in
-  "$CLAUDE_DIR"*) fail "vault path must not live inside ~/.claude/ (it would overlap the source)" ;;
+# Refuse only the actual ~/.claude dir or a path *inside* it — match on a path boundary, not a
+# bare string prefix (so a sibling like ~/.claude-vault is allowed).
+if [ "$VAULT_BASE" = "$CLAUDE_DIR" ]; then
+  fail "vault path must not be ~/.claude/ itself"
+fi
+case "$VAULT_BASE/" in
+  "$CLAUDE_DIR"/*) fail "vault path must not live inside ~/.claude/ (it would overlap the source)" ;;
 esac
 note "vault: $VAULT_BASE"
 note "heads-up: the 'Claude/Memory/' subfolder there is fully managed by this tool —"
@@ -97,13 +102,14 @@ render() {  # $1 = template name, $2 = target name
     cp "$target" "$target.bak"
     note "existing foreign $2 backed up to $2.bak"
   fi
-  python3 - "$tmpl" "$target" "$SRC_EXPECTED" "$VAULT_BASE" "$LOGDIR" "$HOOKS_DIR" <<'PY'
+  python3 - "$tmpl" "$target" "$SRC_EXPECTED" "$VAULT_BASE" "$LOGDIR" "$HOOKS_DIR" <<'PY' || fail "failed to render $2"
 import sys
 tmpl, target, src, vault, logdir, hooks = sys.argv[1:7]
 text = open(tmpl).read()
 text = text.replace("@@SRC_EXPECTED@@", src).replace("@@VAULT_BASE@@", vault)
 text = text.replace("@@LOGDIR@@", logdir).replace("@@HOOKS_DIR@@", hooks)
-assert "@@" not in text, "unrendered token left in " + target
+if "@@" in text:
+    sys.exit("unrendered token left in " + target)
 open(target, "w").write(text)
 PY
   chmod +x "$target"
@@ -116,24 +122,44 @@ render vault-session-start.sh.tmpl vault-session-start.sh
 # ---------- Merge hooks into settings.json (deep-merge, dedupe, atomic, backed up) ----------
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
 cp "$SETTINGS" "$SETTINGS.bak.$(/bin/date +%Y%m%d%H%M%S)"
-python3 - "$SETTINGS" "$HOOKS_DIR" <<'PY'
+python3 - "$SETTINGS" "$HOOKS_DIR" <<'PY' || fail "settings.json merge failed — your settings were left UNCHANGED (a .bak backup was kept). Fix the JSON and re-run."
 import json, sys, os
 settings_path, hooks_dir = sys.argv[1], sys.argv[2]
-with open(settings_path) as f:
-    settings = json.load(f)
+try:
+    with open(settings_path, encoding="utf-8-sig") as f:   # utf-8-sig tolerates a BOM
+        settings = json.load(f)
+except Exception as e:
+    sys.exit("could not parse %s: %s" % (settings_path, e))
+if not isinstance(settings, dict):
+    sys.exit("settings.json is not a JSON object (got %s)" % type(settings).__name__)
 hooks = settings.setdefault("hooks", {})
+if not isinstance(hooks, dict):
+    sys.exit("settings.json 'hooks' is not an object")
 
-def entry(event, command, matcher=None):
+# Identify OUR hooks by exact command match (matching only on basename substring would
+# wrongly claim a foreign command that merely contains our script name).
+OURS = {
+    os.path.join(hooks_dir, "vault-session-start.sh"),
+    os.path.join(hooks_dir, "vault-post-write.sh"),
+    os.path.join(hooks_dir, "mirror-memory.sh") + " sync --quiet",
+}
+def is_ours(command, our_command):
+    return command == our_command
+
+def entry(command, matcher=None):
     e = {"hooks": [{"type": "command", "command": command}]}
-    if matcher: e["matcher"] = matcher
+    if matcher:
+        e["matcher"] = matcher
     return e
 
-def has_ours(event_list, basename):
+def find_ours(event_list, our_command):
     for e in event_list:
+        if not isinstance(e, dict):
+            continue
         for h in e.get("hooks", []):
-            if basename in h.get("command", ""):
-                return True
-    return False
+            if isinstance(h, dict) and is_ours(h.get("command", ""), our_command):
+                return h
+    return None
 
 wanted = [
     ("SessionStart", os.path.join(hooks_dir, "vault-session-start.sh"), None),
@@ -143,15 +169,16 @@ wanted = [
 changed = False
 for event, command, matcher in wanted:
     lst = hooks.setdefault(event, [])
-    base = os.path.basename(command.split()[0])
-    if not has_ours(lst, base):
-        lst.append(entry(event, command, matcher))
+    if not isinstance(lst, list):
+        sys.exit("settings.json hooks['%s'] is not a list" % event)
+    if find_ours(lst, command) is None:
+        lst.append(entry(command, matcher))
         changed = True
 
 tmp = settings_path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(settings, f, indent=2)
-json.load(open(tmp))  # validate
+json.load(open(tmp))  # validate what we wrote
 os.replace(tmp, settings_path)
 print("settings.json: hooks " + ("merged" if changed else "already present (no change)"))
 PY
