@@ -4,6 +4,7 @@
 
 **A one-way mirror of [Claude Code](https://claude.com/claude-code)'s memory into your [Obsidian](https://obsidian.md) vault — so you can finally *see* what Claude remembers, with zero risk to the source of truth.**
 
+![version](https://img.shields.io/github/v/release/Gustavogcps/claude-memory-vault?sort=semver)
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![tests](https://img.shields.io/badge/tests-62%20passing-3fb950)

@@ -1,11 +1,11 @@
 # Changelog
 
 All notable changes to this project are documented here. Format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/). This is `0.x` software: it works and is heavily tested, but the design may still evolve before a `1.0.0` that commits to stability.
 
-## [1.0.0] — 2026-06-07
+## [0.66.0] — 2026-06-07
 
-First public release.
+First public release. Versioned `0.66.0` — it reached this shape over ~66 revisions and several adversarial review rounds, and there's room to grow (Linux support, configurable zones) before `1.0.0`.
 
 ### Added
 - One-way `memory → vault` mirror (`mirror-memory.sh`) with `sync` and `check` modes.
